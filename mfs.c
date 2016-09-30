@@ -296,16 +296,16 @@ int mfs_block_for_directory_path(mfs_t *mfs, const char *path, uint16_t *block_n
             uint16_t entry_block = read16(block, i + 2);
             char *entry_name = (char *) (&block[i + 4]);
 
-            // Only descend to directories
-            if(entry_type != MFS_TYPE_DIRECTORY) {
-                fprintf(stderr, "%s is not a directory\n", entry_name);
-                free(path_copy_start);
-                free(block);
-                return -1;
-            }
-
             // Compare the name of the subdirectory with the one we are searching for
             if(strcmp(entry_name, path_seg) == 0) {
+                // Only descend to directories
+                if(entry_type != MFS_TYPE_DIRECTORY) {
+                    fprintf(stderr, "%s is not a directory\n", entry_name);
+                    free(path_copy_start);
+                    free(block);
+                    return -1;
+                }
+
                 // We found the subdirectory
                 found = true;
                 block_number = entry_block;
@@ -532,13 +532,169 @@ int mfs_ls(mfs_t *mfs, const char *path) {
         uint16_t entry_block = read16(block, i + 2);
         char *entry_name = (char *) (&block[i + 4]);
 
-        printf("%-4s 0x%04x %*s\n", entry_type == MFS_TYPE_DIRECTORY ? "dir" : entry_type == MFS_TYPE_FILE ? "file" : "unkn", entry_block, PATH_SEG_MAX, entry_name);
+        printf("%-4s 0x%04x %-*s\n", entry_type == MFS_TYPE_DIRECTORY ? "dir" : entry_type == MFS_TYPE_FILE ? "file" : "unkn", entry_block, PATH_SEG_MAX, entry_name);
     }
 
     free(block);
 
     return 0;
 }
+
+int mfs_touch(mfs_t *mfs, const char *path) {
+    size_t alloc_table_base = META_INFO_BLOCK_SIZE;
+    size_t blocks_base = alloc_table_base + mfs->block_count * 2;
+
+    char *path_copy1 = strdup(path);
+    char *path_copy2 = strdup(path);
+    char *dir = dirname(path_copy1);
+    char *name = basename(path_copy2);
+
+    if(strcmp(name, "/") == 0) {
+        fprintf(stderr, "The root directory can not be modified\n");
+        free(path_copy1);
+        free(path_copy2);
+        return -1;
+    }
+
+    uint16_t block_number = 0;
+    int ret = mfs_block_for_directory_path(mfs, dir, &block_number);
+    if(ret) {
+        fprintf(stderr, "Directory %s not found\n", path);
+        free(path_copy1);
+        free(path_copy2);
+        return -1;
+    }
+
+    uint8_t *block = malloc(sizeof(*block) * mfs->block_size);
+    if (block == NULL) {
+        perror("Memory allocation failed");
+        free(path_copy1);
+        free(path_copy2);
+        return -1;
+    }
+
+    if(strlen(name) > PATH_SEG_MAX) {
+        fprintf(stderr, "File name too long: %s\n", name);
+        free(path_copy1);
+        free(path_copy2);
+        free(block);
+        return -1;
+    }
+
+    // Seek to first block of directory
+    fseek(mfs->f, blocks_base + block_number * mfs->block_size, SEEK_SET);
+
+    // Read block into memory
+    size_t read = fread(block, sizeof(*block), mfs->block_size, mfs->f);
+    if(read != mfs->block_size) {
+        if(ferror(mfs->f)) {
+            perror("File read error");
+        } else if(feof(mfs->f)) {
+            fprintf(stderr, "File to short\n");
+        }
+        free(path_copy1);
+        free(path_copy2);
+        free(block);
+        return -1;
+    }
+
+    bool found = false;
+    bool found_empty = false;
+    uint16_t empty_addr = 0;
+
+    // TODO: search in subsequent blocks (as stated in AllocTable)
+    for(uint16_t i = 0; i < mfs->block_size; i += DIR_RECORD_SIZE) {
+        uint16_t entry_type = read16(block, i);
+
+        if(entry_type == MFS_TYPE_END) {
+            found_empty = true;
+            empty_addr = i;
+            break;
+        }
+
+        uint16_t entry_block = read16(block, i + 2);
+        char *entry_name = (char *) (&block[i + 4]);
+
+        // Compare the name of the entry with the one we'd like to use
+        if(strcmp(entry_name, name) == 0) {
+            found = true;
+            break;
+        }
+    }
+
+    if(found) {
+        fprintf(stderr, "%s already exists\n", name);
+        free(path_copy1);
+        free(path_copy2);
+        free(block);
+        return -1;
+    } else if(!found_empty) {
+        fprintf(stderr, "Block is full\n");
+        free(path_copy1);
+        free(path_copy2);
+        free(block);
+        return -1;
+    } else {
+        // Find first free block
+        uint16_t new_block_number;
+        for(new_block_number = 1; new_block_number < mfs->block_count; new_block_number++) {
+            uint16_t value = read16(mfs->alloc_table, new_block_number * 2u);
+
+            if(value == BLOCK_UNUSED) {
+                break;
+            }
+        }
+
+        if(new_block_number == mfs->block_count) {
+            fprintf(stderr, "All blocks are used\n");
+            free(path_copy1);
+            free(path_copy2);
+            free(block);
+            return -1;
+        }
+
+        // Mark the block in AllocTable as used (in mfs->alloc_table AND on disk)
+        write16(mfs->alloc_table, block_number * 2u, BLOCK_EOF);
+
+        fseek(mfs->f, alloc_table_base + new_block_number * 2u, SEEK_SET);
+
+        uint8_t tmp[2];
+        write16(tmp, 0, BLOCK_EOF);
+        size_t written = fwrite(tmp, sizeof(*tmp), 2, mfs->f);
+        if (written != 2) {
+            perror("Write operation failed");
+            free(path_copy1);
+            free(path_copy2);
+            free(block);
+            return -1;
+        }
+
+        // Write the entry for the new directory in its parent directory
+        fseek(mfs->f, blocks_base + mfs->block_size * block_number + empty_addr, SEEK_SET);
+
+        uint8_t entry[DIR_RECORD_SIZE] = { 0 };
+
+        write16(entry, 0, MFS_TYPE_FILE);
+        write16(entry, 2, new_block_number);
+        strcpy((char *) &entry[4], name);
+
+        size_t written2 = fwrite(entry, sizeof(*entry), DIR_RECORD_SIZE, mfs->f);
+        if (written2 != DIR_RECORD_SIZE) {
+            perror("Write operation failed");
+            free(path_copy1);
+            free(path_copy2);
+            free(block);
+            return -1;
+        }
+    }
+
+    free(path_copy1);
+    free(path_copy2);
+    free(block);
+
+    return 0;
+}
+
 
 int mfs_do(char *filename, int optc, char **optv) {
     size_t read;
@@ -628,6 +784,17 @@ int mfs_do(char *filename, int optc, char **optv) {
                 ret = mfs_ls(&mfs, optv[1]);
             }
             break;
+        case MFS_ACTION_TOUCH:
+            if(optc > 1) {
+                ret = mfs_touch(&mfs, optv[1]);
+            }
+            break;
+        case MFS_ACTION_RM:
+            break;
+        case MFS_ACTION_WRITE:
+            break;
+        case MFS_ACTION_READ:
+            break;
     }
     if(ret) {
         fprintf(stderr, "Action failed\n");
@@ -637,6 +804,5 @@ int mfs_do(char *filename, int optc, char **optv) {
 
     fclose(f);
 
-    return EXIT_SUCCESS;
+    return ret;
 }
-
