@@ -5,8 +5,10 @@
 #include <string.h>
 #include <stdbool.h>
 #include <libgen.h>
+#include <sys/stat.h>
 
 #include "mfs.h"
+#include "parse_opts.h"
 
 #define BLOCK_SIZE 128
 #define BLOCK_COUNT 128
@@ -76,7 +78,37 @@ int mfs_create(char *filename, int optc, char **optv) {
     uint16_t block_size = BLOCK_SIZE;
     uint16_t block_count = BLOCK_COUNT;
 
+    for(int i = 0; i < optc; i++) {
+        char *opt = strdup(optv[i]);
+        char *name;
+        char *value;
+
+        parse_opt(opt, &name, &value);
+
+        if(strcmp(name, "bs") == 0) {
+            if(value) {
+                block_size = (uint16_t) strtoul(value, NULL, 10);
+            }
+        } else if(strcmp(name, "bc") == 0) {
+            if(value) {
+                block_count = (uint16_t) strtoul(value, NULL, 10);
+            }
+        }
+
+        free(opt);
+    }
+
+    if(block_size == 0 || (block_size / DIR_RECORD_SIZE) * DIR_RECORD_SIZE != block_size) {
+        fprintf(stderr, "Invalid block size\n");
+        return -1;
+    } else if(block_count == 0) {
+        fprintf(stderr, "Invalid block count\n");
+        return -1;
+    }
+
 #ifdef DEBUG
+    printf("Block size: %u\n", block_size);
+    printf("Block count: %u\n", block_count);
     printf("Expected file size: %lu\n", (unsigned long) (META_INFO_BLOCK_SIZE + block_count * 2u + block_count * block_size));
 #endif
 
@@ -153,6 +185,16 @@ int mfs_create(char *filename, int optc, char **optv) {
 
         free(block);
     }
+
+#ifdef DEBUG
+    struct stat st;
+    fflush(f);
+    if(fstat(fileno(f), &st) == 0) {
+        printf("Actual size: %lu\n", st.st_size);
+    } else {
+        perror("fstat() failed");
+    }
+#endif
 
     fclose(f);
 
@@ -694,7 +736,6 @@ int mfs_touch(mfs_t *mfs, const char *path) {
 
     return 0;
 }
-
 
 int mfs_do(char *filename, int optc, char **optv) {
     size_t read;

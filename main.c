@@ -14,26 +14,18 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    char *cmd = argv[1];
+    char *filename = argv[1];
+    char *cmd = argv[2];
 
     char **optv;
     int optc;
     if(argc > 3) {
-        optv = &argv[2];
+        optv = &argv[3];
         optc = argc - 3;
     } else {
         optv = NULL;
         optc = 0;
     }
-
-    char *filename = argv[argc - 1];
-
-#ifdef DEBUG
-    printf("%s %s\n", cmd, filename);
-    for(int i = 0; i < optc; i++) {
-        printf("opt %s\n", optv[i]);
-    }
-#endif
 
     int ret;
     if(strcmp("create", cmd) == 0) {

@@ -14,11 +14,14 @@ make
 ## Running
 
 ```bash
-./MFS COMMAND [OPTIONS] FILENAME
+./MFS FILENAME COMMAND [OPTIONS]
 ```
 
 e.g.
 ```bash
-./MFS create bs=1024 test.img
-./MFS dump test.img
+./MFS test.img create bs=128 bc=128
+./MFS test.img dump
+./MFS test.img do ls /
+./MFS test.img do mkdir /testdir
+./MFS test.img touch /testdir/abc.txt
 ```
