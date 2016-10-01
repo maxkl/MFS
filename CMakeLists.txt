@@ -7,5 +7,5 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_definitions(-DDEBUG)
 endif()
 
-set(SOURCE_FILES main.c mfs.c mfs.h parse_opts.c parse_opts.h)
+set(SOURCE_FILES main.c mfs.c mfs.h parse_opts.c parse_opts.h util.h)
 add_executable(MFS ${SOURCE_FILES})

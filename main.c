@@ -4,9 +4,8 @@
 #include <string.h>
 #include <stdbool.h>
 
+#include "util.h"
 #include "mfs.h"
-
-#define strequal(a, b) (strcmp((a), (b)) == 0)
 
 int main_repl(mfs_t *mfs, int optc, char **optv);
 
@@ -33,27 +32,21 @@ int main(int argc, char **argv) {
     }
 
     int ret;
-    if(strequal("create", cmd)) {
+    if(strequals("create", cmd)) {
         ret = mfs_create(filename, optc, optv);
-    } else {
+    } else if(strequals("repl", cmd)) {
         mfs_t *mfs = mfs_open(filename);
         if(mfs == NULL) {
             fprintf(stderr, "Failed to open MFS file\n");
             return EXIT_FAILURE;
         }
 
-        if (strequal("repl", cmd)) {
-            ret = main_repl(mfs, optc, optv);
-        } else if (strequal("dump", cmd)) {
-            ret = mfs_dump(mfs, optc, optv);
-        } else if (strequal("do", cmd)) {
-            ret = mfs_do(mfs, optc, optv);
-        } else {
-            fprintf(stderr, "Unknown command %s\n", cmd);
-            ret = EXIT_FAILURE;
-        }
+        ret = main_repl(mfs, optc, optv);
 
         mfs_free(mfs);
+    } else {
+        fprintf(stderr, "Unknown command %s\n", cmd);
+        ret = EXIT_FAILURE;
     }
 
     return ret;
@@ -110,28 +103,32 @@ int main_repl(mfs_t *mfs, int optc, char **optv) {
 
         char *cmd = args[0];
 
-        if(strequal(cmd, "exit")) {
+        if(strequals(cmd, "exit")) {
             printf("Bye\n");
             break;
-        } else if(strequal(cmd, "mkdir")) {
+        } else if(strequals(cmd, "sync")) {
+            fflush(mfs->f);
+        } else if(strequals(cmd, "info")) {
+            mfs_info(mfs);
+        } else if(strequals(cmd, "mkdir")) {
             if(arg_count >= 2) {
                 mfs_mkdir(mfs, args[1]);
             } else {
                 fprintf(stderr, "Missing path\n");
             }
-        } else if(strequal(cmd, "rmdir")) {
+        } else if(strequals(cmd, "rmdir")) {
             if(arg_count >= 2) {
                 mfs_rmdir(mfs, args[1]);
             } else {
                 fprintf(stderr, "Missing path\n");
             }
-        } else if(strequal(cmd, "ls")) {
+        } else if(strequals(cmd, "ls")) {
             if(arg_count >= 2) {
                 mfs_ls(mfs, args[1]);
             } else {
                 fprintf(stderr, "Missing path\n");
             }
-        } else if(strequal(cmd, "touch")) {
+        } else if(strequals(cmd, "touch")) {
             if(arg_count >= 2) {
                 mfs_touch(mfs, args[1]);
             } else {
