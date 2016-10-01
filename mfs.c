@@ -49,13 +49,6 @@ static const struct {
         { MFS_ACTION_READ, "read"}
 };
 
-typedef struct {
-    uint16_t block_size;
-    uint16_t block_count;
-    uint8_t *alloc_table;
-    FILE *f;
-} mfs_t;
-
 void write16(uint8_t *buf, size_t index, uint16_t data) {
     buf[index] = data & 0xFF;
     buf[index + 1] = (data >> 8) & 0xFF;
@@ -201,67 +194,14 @@ int mfs_create(char *filename, int optc, char **optv) {
     return EXIT_SUCCESS;
 }
 
-int mfs_dump(char *filename, int optc, char **optv) {
-    size_t read;
-
-    FILE *f = fopen(filename, "rb");
-
-    if(f == NULL) {
-        perror("Failed to open file");
-        return EXIT_FAILURE;
-    }
-
-    uint8_t *meta_info_block = (uint8_t *) malloc(sizeof(*meta_info_block) * META_INFO_BLOCK_SIZE);
-    if(meta_info_block == NULL) {
-        perror("Memory allocation failed");
-        fclose(f);
-        return EXIT_FAILURE;
-    }
-
-    read = fread(meta_info_block, sizeof(uint8_t), META_INFO_BLOCK_SIZE, f);
-    if(read != META_INFO_BLOCK_SIZE) {
-        if(ferror(f)) {
-            perror("File read error");
-        } else if(feof(f)) {
-            fprintf(stderr, "File to short\n");
-        }
-        fclose(f);
-        return EXIT_FAILURE;
-    }
-
-    uint16_t block_size = read16(meta_info_block, 0);
-    uint16_t block_count = read16(meta_info_block, 2);
-
-    printf("Block size: %u\n", block_size);
-    printf("Block count: %u\n", block_count);
-
-    free(meta_info_block);
-
-    // AllocTable contains 16 bit addresses
-    size_t alloc_table_size = block_count * 2u;
-
-    uint8_t *alloc_table = malloc(sizeof(*alloc_table) * alloc_table_size);
-    if (alloc_table == NULL) {
-        perror("Memory allocation failed");
-        fclose(f);
-        return EXIT_FAILURE;
-    }
-
-    read = fread(alloc_table, sizeof(uint8_t), alloc_table_size, f);
-    if(read != alloc_table_size) {
-        if(ferror(f)) {
-            perror("File read error");
-        } else if(feof(f)) {
-            fprintf(stderr, "File to short\n");
-        }
-        fclose(f);
-        return EXIT_FAILURE;
-    }
+int mfs_dump(mfs_t *mfs, int optc, char **optv) {
+    printf("Block size: %u\n", mfs->block_size);
+    printf("Block count: %u\n", mfs->block_count);
 
     unsigned int unused = 0;
     unsigned int used = 0;
-    for(uint16_t i = 0; i < block_count; i++) {
-        uint16_t value = read16(alloc_table, i * 2);
+    for(uint16_t i = 0; i < mfs->block_count; i++) {
+        uint16_t value = read16(mfs->alloc_table, i * 2u);
 
         if(value == BLOCK_UNUSED) {
             unused++;
@@ -269,11 +209,7 @@ int mfs_dump(char *filename, int optc, char **optv) {
             used++;
         }
     }
-    printf("%u blocks (%u bytes) used, %u unused (%u bytes)\n", used, used * block_size, unused, unused * block_size);
-
-    free(alloc_table);
-
-    fclose(f);
+    printf("%u blocks (%u bytes) used, %u unused (%u bytes)\n", used, used * mfs->block_size, unused, unused * mfs->block_size);
 
     return EXIT_SUCCESS;
 }
@@ -302,7 +238,7 @@ int mfs_block_for_directory_path(mfs_t *mfs, const char *path, uint16_t *block_n
             continue;
         }
 
-        if(strlen(path_seg) > PATH_SEG_MAX) {
+        if(strlen(path_seg) + 1 > PATH_SEG_MAX) {
             fprintf(stderr, "Path segment too long: %s\n", path_seg);
             free(path_copy_start);
             free(block);
@@ -372,6 +308,104 @@ int mfs_block_for_directory_path(mfs_t *mfs, const char *path, uint16_t *block_n
     return 0;
 }
 
+typedef struct {
+    uint16_t type;
+    uint16_t block_number;
+    char *name;
+} directory_entry_t;
+
+typedef struct {
+    mfs_t *mfs;
+    uint8_t *block;
+    bool stop;
+    uint16_t i;
+    directory_entry_t *entry;
+} directory_iterator_t;
+
+directory_iterator_t *create_directory_iterator(mfs_t *mfs, uint16_t block_number) {
+    size_t alloc_table_base = META_INFO_BLOCK_SIZE;
+    size_t blocks_base = alloc_table_base + mfs->block_count * 2;
+
+    uint8_t *block = malloc(sizeof(*block) * mfs->block_size);
+    if (block == NULL) {
+        perror("Memory allocation failed");
+        return NULL;
+    }
+
+    // Seek to first block of directory
+    fseek(mfs->f, blocks_base + block_number * mfs->block_size, SEEK_SET);
+
+    // Read block into memory
+    size_t read = fread(block, sizeof(*block), mfs->block_size, mfs->f);
+    if(read != mfs->block_size) {
+        if(ferror(mfs->f)) {
+            perror("File read error");
+        } else if(feof(mfs->f)) {
+            fprintf(stderr, "File to short\n");
+        }
+        free(block);
+        return NULL;
+    }
+
+    directory_iterator_t *it = malloc(sizeof(directory_iterator_t));
+    if (it == NULL) {
+        perror("Memory allocation failed");
+        free(block);
+        return NULL;
+    }
+
+    directory_entry_t *entry = malloc(sizeof(directory_entry_t));
+    if (entry == NULL) {
+        perror("Memory allocation failed");
+        free(it);
+        free(block);
+        return NULL;
+    }
+
+    it->mfs = mfs;
+    it->block = block;
+    it->stop = false;
+    it->i = 0;
+    it->entry = entry;
+
+    return it;
+}
+
+directory_entry_t *next_directory_entry(directory_iterator_t *it) {
+    if(it->stop) {
+        return NULL;
+    }
+
+    // TODO: search in subsequent blocks (as stated in AllocTable)
+    if(it->i >= it->mfs->block_size) {
+        // End reached
+        return NULL;
+    }
+
+    uint16_t entry_type = read16(it->block, it->i);
+
+    if(entry_type == MFS_TYPE_END) {
+        return NULL;
+    }
+
+    uint16_t entry_block = read16(it->block, it->i + 2);
+    char *entry_name = (char *) (&it->block[it->i + 4]);
+
+    it->entry->type = entry_type;
+    it->entry->block_number = entry_block;
+    it->entry->name = entry_name;
+
+    it->i += DIR_RECORD_SIZE;
+
+    return it->entry;
+}
+
+void free_directory_iterator(directory_iterator_t *it) {
+    free(it->block);
+    free(it->entry);
+    free(it);
+}
+
 int mfs_mkdir(mfs_t *mfs, const char *path) {
     size_t alloc_table_base = META_INFO_BLOCK_SIZE;
     size_t blocks_base = alloc_table_base + mfs->block_count * 2;
@@ -405,7 +439,7 @@ int mfs_mkdir(mfs_t *mfs, const char *path) {
         return -1;
     }
 
-    if(strlen(name) > PATH_SEG_MAX) {
+    if(strlen(name) + 1 > PATH_SEG_MAX) {
         fprintf(stderr, "Path segment too long: %s\n", name);
         free(path_copy1);
         free(path_copy2);
@@ -532,9 +566,6 @@ int mfs_rmdir(mfs_t *mfs, const char *path) {
 }
 
 int mfs_ls(mfs_t *mfs, const char *path) {
-    size_t alloc_table_base = META_INFO_BLOCK_SIZE;
-    size_t blocks_base = alloc_table_base + mfs->block_count * 2;
-
     uint16_t block_number = 0;
     int ret = mfs_block_for_directory_path(mfs, path, &block_number);
     if(ret) {
@@ -542,42 +573,17 @@ int mfs_ls(mfs_t *mfs, const char *path) {
         return -1;
     }
 
-    uint8_t *block = malloc(sizeof(*block) * mfs->block_size);
-    if (block == NULL) {
-        perror("Memory allocation failed");
+    directory_iterator_t *it = create_directory_iterator(mfs, block_number);
+    if(it == NULL) {
+        fprintf(stderr, "Failed to iterate directory\n");
         return -1;
     }
 
-    // Seek to first block of directory
-    fseek(mfs->f, blocks_base + block_number * mfs->block_size, SEEK_SET);
-
-    // Read block into memory
-    size_t read = fread(block, sizeof(*block), mfs->block_size, mfs->f);
-    if(read != mfs->block_size) {
-        if(ferror(mfs->f)) {
-            perror("File read error");
-        } else if(feof(mfs->f)) {
-            fprintf(stderr, "File to short\n");
-        }
-        free(block);
-        return -1;
+    while(next_directory_entry(it)) {
+        printf("%-4s 0x%04x %-*s\n", it->entry->type == MFS_TYPE_DIRECTORY ? "dir" : it->entry->type == MFS_TYPE_FILE ? "file" : "unkn", it->entry->block_number, PATH_SEG_MAX, it->entry->name);
     }
 
-    // TODO: search in subsequent blocks (as stated in AllocTable)
-    for(uint16_t i = 0; i < mfs->block_size; i += DIR_RECORD_SIZE) {
-        uint16_t entry_type = read16(block, i);
-
-        if(entry_type == MFS_TYPE_END) {
-            break;
-        }
-
-        uint16_t entry_block = read16(block, i + 2);
-        char *entry_name = (char *) (&block[i + 4]);
-
-        printf("%-4s 0x%04x %-*s\n", entry_type == MFS_TYPE_DIRECTORY ? "dir" : entry_type == MFS_TYPE_FILE ? "file" : "unkn", entry_block, PATH_SEG_MAX, entry_name);
-    }
-
-    free(block);
+    free_directory_iterator(it);
 
     return 0;
 }
@@ -615,7 +621,7 @@ int mfs_touch(mfs_t *mfs, const char *path) {
         return -1;
     }
 
-    if(strlen(name) > PATH_SEG_MAX) {
+    if(strlen(name) + 1 > PATH_SEG_MAX) {
         fprintf(stderr, "File name too long: %s\n", name);
         free(path_copy1);
         free(path_copy2);
@@ -737,9 +743,7 @@ int mfs_touch(mfs_t *mfs, const char *path) {
     return 0;
 }
 
-int mfs_do(char *filename, int optc, char **optv) {
-    size_t read;
-
+int mfs_do(mfs_t *mfs, int optc, char **optv) {
     if(optc < 1) {
         fprintf(stderr, "No action provided\n");
         return EXIT_FAILURE;
@@ -751,29 +755,68 @@ int mfs_do(char *filename, int optc, char **optv) {
         return EXIT_FAILURE;
     }
 
+    int ret = -1;
+    switch(action) {
+        case MFS_ACTION_MKDIR:
+            if(optc > 1) {
+                ret = mfs_mkdir(mfs, optv[1]);
+            }
+            break;
+        case MFS_ACTION_RMDIR:
+            if(optc > 1) {
+                ret = mfs_rmdir(mfs, optv[1]);
+            }
+            break;
+        case MFS_ACTION_LS:
+            if(optc > 1) {
+                ret = mfs_ls(mfs, optv[1]);
+            }
+            break;
+        case MFS_ACTION_TOUCH:
+            if(optc > 1) {
+                ret = mfs_touch(mfs, optv[1]);
+            }
+            break;
+        case MFS_ACTION_RM:
+            break;
+        case MFS_ACTION_WRITE:
+            break;
+        case MFS_ACTION_READ:
+            break;
+    }
+    if(ret) {
+        fprintf(stderr, "Action failed\n");
+    }
+
+    return ret;
+}
+
+mfs_t *mfs_open(char *filename) {
+    size_t read;
+
     FILE *f = fopen(filename, "r+b");
 
-    if(f == NULL) {
+    if (f == NULL) {
         perror("Failed to open file");
-        return EXIT_FAILURE;
+        return NULL;
     }
 
     uint8_t *meta_info_block = (uint8_t *) malloc(sizeof(*meta_info_block) * META_INFO_BLOCK_SIZE);
-    if(meta_info_block == NULL) {
+    if (meta_info_block == NULL) {
         perror("Memory allocation failed");
         fclose(f);
-        return EXIT_FAILURE;
+        return NULL;
     }
 
     read = fread(meta_info_block, sizeof(uint8_t), META_INFO_BLOCK_SIZE, f);
-    if(read != META_INFO_BLOCK_SIZE) {
-        if(ferror(f)) {
+    if (read != META_INFO_BLOCK_SIZE) {
+        if (ferror(f)) {
             perror("File read error");
-        } else if(feof(f)) {
+        } else if (feof(f)) {
             fprintf(stderr, "File to short\n");
         }
         fclose(f);
-        return EXIT_FAILURE;
+        return NULL;
     }
 
     uint16_t block_size = read16(meta_info_block, 0);
@@ -788,62 +831,38 @@ int mfs_do(char *filename, int optc, char **optv) {
     if (alloc_table == NULL) {
         perror("Memory allocation failed");
         fclose(f);
-        return EXIT_FAILURE;
+        return NULL;
     }
 
     read = fread(alloc_table, sizeof(uint8_t), alloc_table_size, f);
-    if(read != alloc_table_size) {
-        if(ferror(f)) {
+    if (read != alloc_table_size) {
+        if (ferror(f)) {
             perror("File read error");
-        } else if(feof(f)) {
+        } else if (feof(f)) {
             fprintf(stderr, "File to short\n");
         }
         fclose(f);
-        return EXIT_FAILURE;
+        return NULL;
     }
 
-    mfs_t mfs;
-    mfs.block_size = block_size;
-    mfs.block_count = block_count;
-    mfs.alloc_table = alloc_table;
-    mfs.f = f;
-
-    int ret = -1;
-    switch(action) {
-        case MFS_ACTION_MKDIR:
-            if(optc > 1) {
-                ret = mfs_mkdir(&mfs, optv[1]);
-            }
-            break;
-        case MFS_ACTION_RMDIR:
-            if(optc > 1) {
-                ret = mfs_rmdir(&mfs, optv[1]);
-            }
-            break;
-        case MFS_ACTION_LS:
-            if(optc > 1) {
-                ret = mfs_ls(&mfs, optv[1]);
-            }
-            break;
-        case MFS_ACTION_TOUCH:
-            if(optc > 1) {
-                ret = mfs_touch(&mfs, optv[1]);
-            }
-            break;
-        case MFS_ACTION_RM:
-            break;
-        case MFS_ACTION_WRITE:
-            break;
-        case MFS_ACTION_READ:
-            break;
-    }
-    if(ret) {
-        fprintf(stderr, "Action failed\n");
+    mfs_t *mfs = malloc(sizeof(mfs_t));
+    if (mfs == NULL) {
+        perror("Memory allocation failed");
+        fclose(f);
+        return NULL;
     }
 
-    free(alloc_table);
+    mfs->block_size = block_size;
+    mfs->block_count = block_count;
+    mfs->alloc_table = alloc_table;
+    mfs->f = f;
 
-    fclose(f);
-
-    return ret;
+    return mfs;
 }
+
+void mfs_free(mfs_t *mfs) {
+    free(mfs->alloc_table);
+    fclose(mfs->f);
+    free(mfs);
+}
+
