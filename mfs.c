@@ -607,7 +607,7 @@ int mfs_touch(mfs_t *mfs, const char *path) {
     uint16_t block_number = 0;
     int ret = mfs_block_for_directory_path(mfs, dir, &block_number);
     if(ret) {
-        fprintf(stderr, "Directory %s not found\n", path);
+        fprintf(stderr, "Failed to open directory\n");
         free(path_copy1);
         free(path_copy2);
         return -1;

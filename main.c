@@ -32,37 +32,42 @@ int main(int argc, char **argv) {
         optc = 0;
     }
 
-    mfs_t *mfs = mfs_open(filename);
-    if(mfs == NULL) {
-        fprintf(stderr, "Failed to open MFS file\n");
-        return EXIT_FAILURE;
-    }
-
     int ret;
-    if(strcmp("repl", cmd) == 0) {
-        ret = main_repl(mfs, optc, optv);
-    } else if(strcmp("create", cmd) == 0) {
+    if(strequal("create", cmd)) {
         ret = mfs_create(filename, optc, optv);
-    } else if(strcmp("dump", cmd) == 0) {
-        ret = mfs_dump(mfs, optc, optv);
-    } else if(strcmp("do", cmd) == 0) {
-        ret = mfs_do(mfs, optc, optv);
     } else {
-        fprintf(stderr, "Unknown command %s\n", cmd);
-        ret = EXIT_FAILURE;
-    }
+        mfs_t *mfs = mfs_open(filename);
+        if(mfs == NULL) {
+            fprintf(stderr, "Failed to open MFS file\n");
+            return EXIT_FAILURE;
+        }
 
-    mfs_free(mfs);
+        if (strequal("repl", cmd)) {
+            ret = main_repl(mfs, optc, optv);
+        } else if (strequal("dump", cmd)) {
+            ret = mfs_dump(mfs, optc, optv);
+        } else if (strequal("do", cmd)) {
+            ret = mfs_do(mfs, optc, optv);
+        } else {
+            fprintf(stderr, "Unknown command %s\n", cmd);
+            ret = EXIT_FAILURE;
+        }
+
+        mfs_free(mfs);
+    }
 
     return ret;
 }
 
-#define LINE_MAXLEN 10
+#define LINE_MAXLEN 1024
+#define ARGS_MAX 2
 
-int main_repl(mfs_t *mfs, int optc, char **argv) {
+int main_repl(mfs_t *mfs, int optc, char **optv) {
     int c;
     bool exit = false;
-    char line[LINE_MAXLEN];
+    char line[LINE_MAXLEN + 1];
+    char *args[ARGS_MAX];
+    int arg_count = 0;
     int i = 0;
     while(1) {
         printf("> ");
@@ -75,22 +80,66 @@ int main_repl(mfs_t *mfs, int optc, char **argv) {
 
             if(i < LINE_MAXLEN) {
                 line[i] = (char) c;
+                i++;
             }
-
-            i++;
         }
 
-        if(exit) break;
+        if(exit) {
+            putchar('\n');
+            break;
+        }
 
         line[i] = '\0';
+        i = 0;
 
-        if(strequal(line, "lsroot")) {
-            mfs_ls(mfs, "/");
+        arg_count = 0;
+        char *token = strtok(line, " ");
+        while(token != NULL) {
+            if(arg_count < ARGS_MAX) {
+                args[arg_count] = token;
+                arg_count++;
+            } else {
+                fprintf(stderr, "Too many arguments\n");
+            }
+            token = strtok(NULL, " ");
+        }
+
+        if(arg_count < 1) {
+            continue;
+        }
+
+        char *cmd = args[0];
+
+        if(strequal(cmd, "exit")) {
+            printf("Bye\n");
+            break;
+        } else if(strequal(cmd, "mkdir")) {
+            if(arg_count >= 2) {
+                mfs_mkdir(mfs, args[1]);
+            } else {
+                fprintf(stderr, "Missing path\n");
+            }
+        } else if(strequal(cmd, "rmdir")) {
+            if(arg_count >= 2) {
+                mfs_rmdir(mfs, args[1]);
+            } else {
+                fprintf(stderr, "Missing path\n");
+            }
+        } else if(strequal(cmd, "ls")) {
+            if(arg_count >= 2) {
+                mfs_ls(mfs, args[1]);
+            } else {
+                fprintf(stderr, "Missing path\n");
+            }
+        } else if(strequal(cmd, "touch")) {
+            if(arg_count >= 2) {
+                mfs_touch(mfs, args[1]);
+            } else {
+                fprintf(stderr, "Missing file name\n");
+            }
         } else {
             fprintf(stderr, "Unknown command\n");
         }
-
-        i = 0;
     }
     return 0;
 }
