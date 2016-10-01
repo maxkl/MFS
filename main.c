@@ -134,6 +134,24 @@ int main_repl(mfs_t *mfs, int optc, char **optv) {
             } else {
                 fprintf(stderr, "Missing file name\n");
             }
+        } else if(strequals(cmd, "rm")) {
+            if(arg_count >= 2) {
+                mfs_rm(mfs, args[1]);
+            } else {
+                fprintf(stderr, "Missing file name\n");
+            }
+        } else if(strequals(cmd, "write")) {
+            if(arg_count >= 2) {
+                mfs_write(mfs, args[1]);
+            } else {
+                fprintf(stderr, "Missing file name\n");
+            }
+        } else if(strequals(cmd, "read")) {
+            if(arg_count >= 2) {
+                mfs_read(mfs, args[1]);
+            } else {
+                fprintf(stderr, "Missing file name\n");
+            }
         } else {
             fprintf(stderr, "Unknown command\n");
         }

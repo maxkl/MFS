@@ -741,3 +741,15 @@ int mfs_touch(mfs_t *mfs, const char *path) {
 
     return 0;
 }
+
+int mfs_rm(mfs_t *mfs, const char *path) {
+    return -1;
+}
+
+int mfs_write(mfs_t *mfs, const char *path) {
+    return -1;
+}
+
+int mfs_read(mfs_t *mfs, const char *path) {
+    return -1;
+}

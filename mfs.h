@@ -22,3 +22,6 @@ int mfs_mkdir(mfs_t *mfs, const char *path);
 int mfs_rmdir(mfs_t *mfs, const char *path);
 int mfs_ls(mfs_t *mfs, const char *path);
 int mfs_touch(mfs_t *mfs, const char *path);
+int mfs_rm(mfs_t *mfs, const char *path);
+int mfs_write(mfs_t *mfs, const char *path);
+int mfs_read(mfs_t *mfs, const char *path);
