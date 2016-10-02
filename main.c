@@ -54,6 +54,34 @@ int main(int argc, char **argv) {
 
 #define LINE_MAXLEN 1024
 #define ARGS_MAX 2
+#define READ_STRING_SIZE_INC 16
+
+char *read_string(FILE *stream) {
+    size_t buflen = READ_STRING_SIZE_INC;
+    char *str = realloc(NULL, sizeof(*str) * buflen);
+    if(str == NULL) {
+        return NULL;
+    }
+
+    size_t len = 0;
+
+    int c;
+    while((c = fgetc(stream)) != EOF) {
+        str[len] = (char) c;
+
+        len++;
+        if(len == buflen) {
+            buflen += READ_STRING_SIZE_INC;
+            str = realloc(str, sizeof(*str) * buflen);
+            if(str == NULL) {
+                return NULL;
+            }
+        }
+    }
+    str[len] = '\0';
+    len++;
+    return realloc(str, sizeof(*str) * len);
+}
 
 int main_repl(mfs_t *mfs, int optc, char **optv) {
     int c;
@@ -140,17 +168,49 @@ int main_repl(mfs_t *mfs, int optc, char **optv) {
             } else {
                 fprintf(stderr, "Missing file name\n");
             }
-        } else if(strequals(cmd, "write")) {
+        } else if(strequals(cmd, "fopen")) {
             if(arg_count >= 2) {
-                mfs_write(mfs, args[1]);
+                mfs_fopen(mfs, args[1]);
             } else {
                 fprintf(stderr, "Missing file name\n");
             }
-        } else if(strequals(cmd, "read")) {
+        } else if(strequals(cmd, "fclose")) {
+            mfs_fclose(mfs);
+        } else if(strequals(cmd, "finfo")) {
+            mfs_finfo(mfs);
+        } else if(strequals(cmd, "fseek")) {
             if(arg_count >= 2) {
-                mfs_read(mfs, args[1]);
+                mfs_fseek(mfs, (uint16_t) strtoul(args[1], NULL, 10));
             } else {
-                fprintf(stderr, "Missing file name\n");
+                fprintf(stderr, "Missing position\n");
+            }
+        } else if(strequals(cmd, "fwrite")) {
+            char *str = read_string(stdin);
+            if(str == NULL) {
+                fprintf(stderr, "Read error\n");
+            } else {
+                putchar('\n');
+                size_t len = strlen(str);
+                mfs_fwrite(mfs, sizeof(*str) * len, (uint8_t *) str);
+                free(str);
+            }
+        } else if(strequals(cmd, "fread")) {
+            if(arg_count >= 2) {
+                uint16_t len = (uint16_t) strtoul(args[1], NULL, 10);
+                uint8_t *data = malloc(sizeof(*data) * (len + 1));
+                if(data == NULL) {
+                    fprintf(stderr, "Memory allocation failed\n");
+                } else {
+                    if(!mfs_fread(mfs, len, data)) {
+                        data[len] = '\0';
+                        fputs((const char *) data, stdout);
+                        putchar('\n');
+                    }
+
+                    free(data);
+                }
+            } else {
+                fprintf(stderr, "Missing length\n");
             }
         } else {
             fprintf(stderr, "Unknown command\n");

@@ -22,6 +22,8 @@
 #define MFS_TYPE_DIRECTORY 1
 #define MFS_TYPE_FILE 2
 
+#define ALLOC_TABLE_ENTRY_SIZE 4u
+
 #define DIR_RECORD_SIZE 16
 #define PATH_SEG_MAX (DIR_RECORD_SIZE - 4)
 
@@ -96,13 +98,72 @@ directory_iterator_t *create_directory_iterator(mfs_t *mfs, uint16_t block_numbe
     return it;
 }
 
+uint16_t get_block_next(mfs_t *mfs, uint16_t block_number) {
+    return read16(mfs->alloc_table, block_number * ALLOC_TABLE_ENTRY_SIZE);
+}
+
+uint16_t get_block_previous(mfs_t *mfs, uint16_t block_number) {
+    return read16(mfs->alloc_table, block_number * ALLOC_TABLE_ENTRY_SIZE + 2);
+}
+
+int set_block(mfs_t *mfs, uint16_t block, uint16_t previous, uint16_t next) {
+    size_t offset = block * ALLOC_TABLE_ENTRY_SIZE;
+
+    write16(mfs->alloc_table, offset, next);
+    write16(mfs->alloc_table, offset + 2, previous);
+
+    // Save to disk
+    fseek(mfs->f, mfs->alloc_table_base + offset, SEEK_SET);
+    size_t written = fwrite(mfs->alloc_table + offset, sizeof(*mfs->alloc_table), 4, mfs->f);
+    if (written != 4) {
+        perror("Write operation failed");
+        return -1;
+    }
+
+    return 0;
+}
+
+int set_block_next(mfs_t *mfs, uint16_t block, uint16_t next) {
+    return set_block(mfs, block, get_block_previous(mfs, block), next);
+}
+
+int set_block_previous(mfs_t *mfs, uint16_t block, uint16_t previous) {
+    return set_block(mfs, block, previous, get_block_next(mfs, block));
+}
+
+uint16_t find_free_block(mfs_t *mfs) {
+    for(uint16_t block_number = 1; block_number < mfs->block_count; block_number++) {
+        uint16_t value = get_block_next(mfs, block_number);
+
+        if(value == BLOCK_UNUSED) {
+            return block_number;
+        }
+    }
+
+    return 0;
+}
+
+uint16_t alloc_free_block(mfs_t *mfs, uint16_t previous, uint16_t next) {
+    uint16_t free_block = find_free_block(mfs);
+    if(free_block == 0) {
+        fprintf(stderr, "All blocks are used\n");
+        return 0;
+    }
+
+    if(set_block(mfs, free_block, previous, next)) {
+        return 0;
+    }
+
+    return free_block;
+}
+
 directory_entry_t *next_directory_entry(directory_iterator_t *it) {
     if(it->entry_addr >= it->mfs->block_size) {
         // End of block reached
         it->entry_addr = 0;
 
         // Read next block
-        uint16_t next_block_number = read16(it->mfs->alloc_table, it->block_number * 2u);
+        uint16_t next_block_number = get_block_next(it->mfs, it->block_number);
         if(next_block_number == BLOCK_EOF) {
             // The directory contains no more entries
             it->reached_eof = true;
@@ -152,39 +213,6 @@ void free_directory_iterator(directory_iterator_t *it) {
     free(it->block);
     free(it->entry);
     free(it);
-}
-
-int set_block_next(mfs_t *mfs, uint16_t block_number, uint16_t next_block_number) {
-    // Mark the block in AllocTable as used (in mfs->alloc_table AND on disk)
-    write16(mfs->alloc_table, block_number * 2u, next_block_number);
-
-    fseek(mfs->f, mfs->alloc_table_base + block_number * 2u, SEEK_SET);
-
-    uint8_t tmp[2];
-    write16(tmp, 0, next_block_number);
-    size_t written = fwrite(tmp, sizeof(*tmp), 2, mfs->f);
-    if (written != 2) {
-        perror("Write operation failed");
-        return -1;
-    }
-
-    return 0;
-}
-
-int alloc_block(mfs_t *mfs, uint16_t block_number) {
-    return set_block_next(mfs, block_number, BLOCK_EOF);
-}
-
-uint16_t find_free_block(mfs_t *mfs) {
-    for(uint16_t block_number = 1; block_number < mfs->block_count; block_number++) {
-        uint16_t value = read16(mfs->alloc_table, block_number * 2u);
-
-        if(value == BLOCK_UNUSED) {
-            return block_number;
-        }
-    }
-
-    return 0;
 }
 
 int mfs_block_for_directory_path(mfs_t *mfs, const char *path, uint16_t *block_number_out) {
@@ -319,7 +347,7 @@ int mfs_create(char *filename, int optc, char **optv) {
 
     {
         // AllocTable contains 16 bit addresses
-        size_t alloc_table_size = block_count * 2u;
+        size_t alloc_table_size = block_count * ALLOC_TABLE_ENTRY_SIZE;
 
         uint8_t *alloc_table = calloc(alloc_table_size, sizeof(*alloc_table));
         if (alloc_table == NULL) {
@@ -330,6 +358,7 @@ int mfs_create(char *filename, int optc, char **optv) {
 
         // Reserve first block for root directory
         write16(alloc_table, 0, BLOCK_EOF);
+        write16(alloc_table, 2, BLOCK_EOF);
 
         size_t written = fwrite(alloc_table, sizeof(*alloc_table), alloc_table_size, f);
         if (written != alloc_table_size) {
@@ -412,7 +441,7 @@ mfs_t *mfs_open(char *filename) {
     free(meta_info_block);
 
     // AllocTable contains 16 bit addresses
-    size_t alloc_table_size = block_count * 2u;
+    size_t alloc_table_size = block_count * ALLOC_TABLE_ENTRY_SIZE;
 
     uint8_t *alloc_table = malloc(sizeof(*alloc_table) * alloc_table_size);
     if (alloc_table == NULL) {
@@ -440,14 +469,18 @@ mfs_t *mfs_open(char *filename) {
     }
 
     size_t alloc_table_base = META_INFO_BLOCK_SIZE;
-    size_t blocks_base = alloc_table_base + block_count * 2;
+    size_t blocks_base = alloc_table_base + block_count * ALLOC_TABLE_ENTRY_SIZE;
 
+    mfs->f = f;
     mfs->block_size = block_size;
     mfs->block_count = block_count;
     mfs->alloc_table_base = alloc_table_base;
     mfs->blocks_base = blocks_base;
     mfs->alloc_table = alloc_table;
-    mfs->f = f;
+    mfs->file_open = false;
+    mfs->file_start_block_number = 0;
+    mfs->file_block_number = 0;
+    mfs->file_offset = 0;
 
     return mfs;
 }
@@ -465,7 +498,7 @@ int mfs_info(mfs_t *mfs) {
     unsigned int unused = 0;
     unsigned int used = 0;
     for(uint16_t i = 0; i < mfs->block_count; i++) {
-        uint16_t value = read16(mfs->alloc_table, i * 2u);
+        uint16_t value = get_block_next(mfs, i);
 
         if(value == BLOCK_UNUSED) {
             unused++;
@@ -522,6 +555,7 @@ int mfs_mkdir(mfs_t *mfs, const char *path) {
         }
     }
 
+    uint16_t dir_block_number = it->block_number;
     uint16_t empty_addr = it->entry_addr;
     bool reached_eof = it->reached_eof;
 
@@ -534,41 +568,28 @@ int mfs_mkdir(mfs_t *mfs, const char *path) {
         return -1;
     } else {
         // Find first free block
-        uint16_t new_block_number = find_free_block(mfs);
+        uint16_t new_block_number = alloc_free_block(mfs, BLOCK_EOF, BLOCK_EOF);
         if(new_block_number == 0) {
-            fprintf(stderr, "All blocks are used\n");
-            free(path_copy1);
-            free(path_copy2);
-            return -1;
-        }
-
-        if(alloc_block(mfs, new_block_number)) {
             free(path_copy1);
             free(path_copy2);
             return -1;
         }
 
         if(reached_eof) {
-            block_number = find_free_block(mfs);
+            block_number = alloc_free_block(mfs, dir_block_number, BLOCK_EOF);
             if(block_number == 0) {
-                fprintf(stderr, "All blocks are used\n");
-                free(path_copy1);
-                free(path_copy2);
-                return -1;
-            }
-            if(alloc_block(mfs, block_number)) {
                 free(path_copy1);
                 free(path_copy2);
                 return -1;
             }
 
-            if(set_block_next(mfs, it->block_number, block_number)) {
+            if(set_block_next(mfs, dir_block_number, block_number)) {
                 free(path_copy1);
                 free(path_copy2);
                 return -1;
             }
         } else {
-            block_number = it->block_number;
+            block_number = dir_block_number;
         }
 
         // Write the entry for the new directory in its parent directory
@@ -669,6 +690,7 @@ int mfs_touch(mfs_t *mfs, const char *path) {
         }
     }
 
+    uint16_t dir_block_number = it->block_number;
     uint16_t empty_addr = it->entry_addr;
     bool reached_eof = it->reached_eof;
 
@@ -680,8 +702,7 @@ int mfs_touch(mfs_t *mfs, const char *path) {
         free(path_copy2);
         return -1;
     } else {
-        // Find first free block
-        uint16_t new_block_number = find_free_block(mfs);
+        uint16_t new_block_number = alloc_free_block(mfs, BLOCK_EOF, BLOCK_EOF);
         if(new_block_number == 0) {
             fprintf(stderr, "All blocks are used\n");
             free(path_copy1);
@@ -689,33 +710,22 @@ int mfs_touch(mfs_t *mfs, const char *path) {
             return -1;
         }
 
-        if(alloc_block(mfs, new_block_number)) {
-            free(path_copy1);
-            free(path_copy2);
-            return -1;
-        }
-
         if(reached_eof) {
-            block_number = find_free_block(mfs);
+            block_number = alloc_free_block(mfs, dir_block_number, BLOCK_EOF);
             if(block_number == 0) {
                 fprintf(stderr, "All blocks are used\n");
                 free(path_copy1);
                 free(path_copy2);
                 return -1;
             }
-            if(alloc_block(mfs, block_number)) {
-                free(path_copy1);
-                free(path_copy2);
-                return -1;
-            }
 
-            if(set_block_next(mfs, it->block_number, block_number)) {
+            if(set_block_next(mfs, dir_block_number, block_number)) {
                 free(path_copy1);
                 free(path_copy2);
                 return -1;
             }
         } else {
-            block_number = it->block_number;
+            block_number = dir_block_number;
         }
 
         // Write the entry for the new directory in its parent directory
@@ -743,13 +753,228 @@ int mfs_touch(mfs_t *mfs, const char *path) {
 }
 
 int mfs_rm(mfs_t *mfs, const char *path) {
+    // TODO
     return -1;
 }
 
-int mfs_write(mfs_t *mfs, const char *path) {
-    return -1;
+int mfs_fopen(mfs_t *mfs, const char *path) {
+    if(mfs->file_open) {
+        fprintf(stderr, "Only one file can be open at a time\n");
+        return -1;
+    }
+
+    char *path_copy1 = strdup(path);
+    char *path_copy2 = strdup(path);
+    char *dir = dirname(path_copy1);
+    char *name = basename(path_copy2);
+
+    if(strequals(name, "/")) {
+        fprintf(stderr, "The root directory can not be modified\n");
+        free(path_copy1);
+        free(path_copy2);
+        return -1;
+    }
+
+    if(strlen(name) + 1 > PATH_SEG_MAX) {
+        fprintf(stderr, "Directory name too long: %s\n", name);
+        free(path_copy1);
+        free(path_copy2);
+        return -1;
+    }
+
+    uint16_t block_number = 0;
+    int ret = mfs_block_for_directory_path(mfs, dir, &block_number);
+    if(ret) {
+        fprintf(stderr, "Directory %s not found\n", dir);
+        free(path_copy1);
+        free(path_copy2);
+        return -1;
+    }
+
+    directory_iterator_t *it = create_directory_iterator(mfs, block_number);
+    if(it == NULL) {
+        fprintf(stderr, "Failed to iterate directory\n");
+        free(path_copy1);
+        free(path_copy2);
+        return -1;
+    }
+
+    bool found = false;
+    uint16_t file_block_number = 0;
+
+    while(next_directory_entry(it)) {
+        if(strequals(it->entry->name, name)) {
+            if(it->entry->type != MFS_TYPE_FILE) {
+                fprintf(stderr, "Not a file\n");
+                free(path_copy1);
+                free(path_copy2);
+                free_directory_iterator(it);
+                return -1;
+            }
+
+            found = true;
+            file_block_number = it->entry->block_number;
+        }
+    }
+
+    free_directory_iterator(it);
+    free(path_copy1);
+    free(path_copy2);
+
+    if(found) {
+        mfs->file_open = true;
+        mfs->file_start_block_number = file_block_number;
+        mfs->file_block_number = file_block_number;
+        mfs->file_block_index = 0;
+        mfs->file_offset = 0;
+    } else {
+        fprintf(stderr, "File not found\n");
+        return -1;
+    }
+
+    return 0;
 }
 
-int mfs_read(mfs_t *mfs, const char *path) {
-    return -1;
+int mfs_fclose(mfs_t *mfs) {
+    if(!mfs->file_open) {
+        fprintf(stderr, "No open file\n");
+        return -1;
+    }
+
+    mfs->file_open = false;
+
+    return 0;
+}
+
+int mfs_finfo(mfs_t *mfs) {
+    printf("Open:           %s\n", mfs->file_open ? "yes" : "no");
+    if(mfs->file_open) {
+        printf("Start block:    0x%04x\n", mfs->file_start_block_number);
+        printf("Current block:  0x%04x\n", mfs->file_block_number);
+        printf("Current offset: %u\n", mfs->file_offset);
+    }
+    return 0;
+}
+
+int mfs_fseek(mfs_t *mfs, uint16_t pos) {
+    if(!mfs->file_open) {
+        fprintf(stderr, "No open file\n");
+        return -1;
+    }
+
+    uint16_t block_index = pos / mfs->block_size;
+    uint16_t offset = pos % mfs->block_size;
+
+    if(block_index < mfs->file_block_index) {
+        while(block_index < mfs->file_block_index) {
+            uint16_t previous = get_block_previous(mfs, mfs->file_block_number);
+            if(previous == BLOCK_EOF) {
+                fprintf(stderr, "Block 0x%04x has no previous block\n", mfs->file_block_number);
+                return -1;
+            }
+            mfs->file_block_number = previous;
+            mfs->file_block_index--;
+        }
+    } else if(block_index > mfs->file_block_index) {
+        while(block_index > mfs->file_block_index) {
+            uint16_t next = get_block_next(mfs, mfs->file_block_number);
+            if(next == BLOCK_EOF) {
+                fprintf(stderr, "Block 0x%04x has no next block\n", mfs->file_block_number);
+                return -1;
+            }
+            mfs->file_block_number = next;
+            mfs->file_block_index++;
+        }
+    }
+
+    mfs->file_offset = offset;
+
+    return 0;
+}
+
+int mfs_fwrite(mfs_t *mfs, uint16_t len, uint8_t *buf) {
+    if(!mfs->file_open) {
+        fprintf(stderr, "No open file\n");
+        return -1;
+    }
+
+    uint16_t buf_offset = 0;
+    uint16_t remaining = len;
+
+    while(remaining > 0) {
+        fseek(mfs->f, mfs->blocks_base + mfs->file_block_number * mfs->block_size + mfs->file_offset, SEEK_SET);
+
+        uint16_t to_write = mfs->block_size - mfs->file_offset;
+        if(to_write > remaining) to_write = remaining;
+
+        size_t written = fwrite(buf + buf_offset, sizeof(uint8_t), to_write, mfs->f);
+        if (written != to_write) {
+            perror("Failed to write buffer to file");
+            return -1;
+        }
+
+        buf_offset += to_write;
+        remaining -= to_write;
+
+        if(remaining > 0) {
+            uint16_t next_block_number = get_block_next(mfs, mfs->file_block_number);
+            if(next_block_number == BLOCK_EOF) {
+                next_block_number = alloc_free_block(mfs, mfs->file_block_number, BLOCK_EOF);
+                if(next_block_number == 0) {
+                    return -1;
+                }
+                if(set_block_next(mfs, mfs->file_block_number, next_block_number)) {
+                    return -1;
+                }
+            }
+            mfs->file_block_number = next_block_number;
+            mfs->file_block_index++;
+            mfs->file_offset = 0;
+        } else {
+            mfs->file_offset += to_write;
+        }
+    }
+
+    return 0;
+}
+
+int mfs_fread(mfs_t *mfs, uint16_t len, uint8_t *buf) {
+    if(!mfs->file_open) {
+        fprintf(stderr, "No open file\n");
+        return -1;
+    }
+
+    uint16_t buf_offset = 0;
+    uint16_t remaining = len;
+
+    while(remaining > 0) {
+        fseek(mfs->f, mfs->blocks_base + mfs->file_block_number * mfs->block_size + mfs->file_offset, SEEK_SET);
+
+        uint16_t to_read = mfs->block_size - mfs->file_offset;
+        if(to_read > remaining) to_read = remaining;
+
+        size_t read = fread(buf + buf_offset, sizeof(uint8_t), to_read, mfs->f);
+        if (read != to_read) {
+            perror("Failed to read file into buffer");
+            return -1;
+        }
+
+        buf_offset += to_read;
+        remaining -= to_read;
+
+        if(remaining > 0) {
+            uint16_t next_block_number = get_block_next(mfs, mfs->file_block_number);
+            if (next_block_number == BLOCK_EOF) {
+                fprintf(stderr, "Reached EOF\n");
+                return -1;
+            }
+            mfs->file_block_number = next_block_number;
+            mfs->file_block_index++;
+            mfs->file_offset = 0;
+        } else {
+            mfs->file_offset += to_read;
+        }
+    }
+
+    return 0;
 }
