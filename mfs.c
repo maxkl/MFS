@@ -24,8 +24,8 @@
 
 #define ALLOC_TABLE_ENTRY_SIZE 4u
 
-#define DIR_RECORD_SIZE 16
-#define PATH_SEG_MAX (DIR_RECORD_SIZE - 4)
+#define DIR_ENTRY_SIZE 16
+#define PATH_SEG_MAX (DIR_ENTRY_SIZE - 4)
 
 typedef struct {
     uint16_t type;
@@ -204,7 +204,7 @@ directory_entry_t *next_directory_entry(directory_iterator_t *it) {
     it->entry->block_number = entry_block;
     it->entry->name = entry_name;
 
-    it->entry_addr += DIR_RECORD_SIZE;
+    it->entry_addr += DIR_ENTRY_SIZE;
 
     return it->entry;
 }
@@ -303,7 +303,7 @@ int mfs_create(char *filename, int optc, char **optv) {
         free(opt);
     }
 
-    if(block_size == 0 || (block_size / DIR_RECORD_SIZE) * DIR_RECORD_SIZE != block_size) {
+    if(block_size == 0 || (block_size / DIR_ENTRY_SIZE) * DIR_ENTRY_SIZE != block_size) {
         fprintf(stderr, "Invalid block size\n");
         return -1;
     } else if(block_count == 0) {
@@ -595,14 +595,14 @@ int mfs_mkdir(mfs_t *mfs, const char *path) {
         // Write the entry for the new directory in its parent directory
         fseek(mfs->f, mfs->blocks_base + mfs->block_size * block_number + empty_addr, SEEK_SET);
 
-        uint8_t entry[DIR_RECORD_SIZE] = { 0 };
+        uint8_t entry[DIR_ENTRY_SIZE] = { 0 };
 
         write16(entry, 0, MFS_TYPE_DIRECTORY);
         write16(entry, 2, new_block_number);
         strcpy((char *) &entry[4], name);
 
-        size_t written2 = fwrite(entry, sizeof(*entry), DIR_RECORD_SIZE, mfs->f);
-        if (written2 != DIR_RECORD_SIZE) {
+        size_t written2 = fwrite(entry, sizeof(*entry), DIR_ENTRY_SIZE, mfs->f);
+        if (written2 != DIR_ENTRY_SIZE) {
             perror("Write operation failed");
             free(path_copy1);
             free(path_copy2);
@@ -617,7 +617,7 @@ int mfs_mkdir(mfs_t *mfs, const char *path) {
 }
 
 int mfs_rmdir(mfs_t *mfs, const char *path) {
-    return -1;
+    return mfs_rm(mfs, path);
 }
 
 int mfs_ls(mfs_t *mfs, const char *path) {
@@ -731,14 +731,14 @@ int mfs_touch(mfs_t *mfs, const char *path) {
         // Write the entry for the new directory in its parent directory
         fseek(mfs->f, mfs->blocks_base + mfs->block_size * block_number + empty_addr, SEEK_SET);
 
-        uint8_t entry[DIR_RECORD_SIZE] = { 0 };
+        uint8_t entry[DIR_ENTRY_SIZE] = { 0 };
 
         write16(entry, 0, MFS_TYPE_FILE);
         write16(entry, 2, new_block_number);
         strcpy((char *) &entry[4], name);
 
-        size_t written2 = fwrite(entry, sizeof(*entry), DIR_RECORD_SIZE, mfs->f);
-        if (written2 != DIR_RECORD_SIZE) {
+        size_t written2 = fwrite(entry, sizeof(*entry), DIR_ENTRY_SIZE, mfs->f);
+        if (written2 != DIR_ENTRY_SIZE) {
             perror("Write operation failed");
             free(path_copy1);
             free(path_copy2);
@@ -753,8 +753,97 @@ int mfs_touch(mfs_t *mfs, const char *path) {
 }
 
 int mfs_rm(mfs_t *mfs, const char *path) {
-    // TODO
-    return -1;
+    char *path_copy1 = strdup(path);
+    char *path_copy2 = strdup(path);
+    char *dir = dirname(path_copy1);
+    char *name = basename(path_copy2);
+
+    if(strequals(name, "/")) {
+        fprintf(stderr, "The root directory can not be modified\n");
+        free(path_copy1);
+        free(path_copy2);
+        return -1;
+    }
+
+    if(strlen(name) + 1 > PATH_SEG_MAX) {
+        fprintf(stderr, "File name too long: %s\n", name);
+        free(path_copy1);
+        free(path_copy2);
+        return -1;
+    }
+
+    uint16_t block_number = 0;
+    int ret = mfs_block_for_directory_path(mfs, dir, &block_number);
+    if(ret) {
+        fprintf(stderr, "Directory %s not found\n", dir);
+        free(path_copy1);
+        free(path_copy2);
+        return -1;
+    }
+
+    directory_iterator_t *it = create_directory_iterator(mfs, block_number);
+    if(it == NULL) {
+        fprintf(stderr, "Failed to iterate directory\n");
+        free(path_copy1);
+        free(path_copy2);
+        return -1;
+    }
+
+    bool found = false;
+    uint16_t last_entry_addr = 0;
+    uint16_t last_entry_block = 0;
+    uint16_t file_block_number = 0;
+    uint16_t file_entry_addr = 0;
+    uint16_t file_entry_block = 0;
+
+    while(next_directory_entry(it)) {
+        last_entry_addr = it->entry_addr;
+        last_entry_block = it->block_number;
+        if(!found && strequals(it->entry->name, name)) {
+            found = true;
+            file_block_number = it->entry->block_number;
+            // FIXME: it->entry_addr is incremented after entry is read, so it refers do the next entry
+            file_entry_addr = it->entry_addr;
+            file_entry_block = it->block_number;
+        }
+    }
+
+    free_directory_iterator(it);
+    free(path_copy1);
+    free(path_copy2);
+
+    if(found) {
+        while(file_block_number != BLOCK_EOF) {
+            uint16_t next_block_number = get_block_next(mfs, file_block_number);
+            set_block(mfs, file_block_number, BLOCK_UNUSED, BLOCK_UNUSED);
+            file_block_number = next_block_number;
+        }
+        uint8_t *entry = malloc(sizeof(*entry) * DIR_ENTRY_SIZE);
+        if(entry == NULL) {
+            perror("No memory for entry");
+            return -1;
+        }
+        fseek(mfs->f, mfs->blocks_base + mfs->block_size * last_entry_block + last_entry_addr, SEEK_SET);
+        size_t read = fread(entry, sizeof(*entry), DIR_ENTRY_SIZE, mfs->f);
+        if(read != DIR_ENTRY_SIZE) {
+            perror("Failed to read entry");
+            free(entry);
+            return -1;
+        }
+        fseek(mfs->f, mfs->blocks_base + mfs->block_size * file_entry_block + file_entry_addr, SEEK_SET);
+        size_t written = fwrite(entry, sizeof(*entry), DIR_ENTRY_SIZE, mfs->f);
+        if(written != DIR_ENTRY_SIZE) {
+            perror("Failed to write entry");
+            free(entry);
+            return -1;
+        }
+        free(entry);
+    } else {
+        fprintf(stderr, "File not found\n");
+        return -1;
+    }
+
+    return 0;
 }
 
 int mfs_fopen(mfs_t *mfs, const char *path) {
